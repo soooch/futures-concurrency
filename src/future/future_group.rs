@@ -1,4 +1,3 @@
-use alloc::collections::BTreeSet;
 use core::fmt::{self, Debug};
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
@@ -65,7 +64,6 @@ pub struct FutureGroup<F> {
     futures: Slab<F>,
     wakers: WakerVec,
     states: PollVec,
-    keys: BTreeSet<usize>,
     capacity: usize,
 }
 
@@ -115,7 +113,6 @@ impl<F> FutureGroup<F> {
             futures: Slab::with_capacity(capacity),
             wakers: WakerVec::new(capacity),
             states: PollVec::new(capacity),
-            keys: BTreeSet::new(),
             capacity,
         }
     }
@@ -190,10 +187,9 @@ impl<F> FutureGroup<F> {
     /// # })
     /// ```
     pub fn remove(&mut self, key: Key) -> bool {
-        let is_present = self.keys.remove(&key.0);
+        let is_present = self.futures.try_remove(key.0).is_some();
         if is_present {
             self.states[key.0].set_none();
-            self.futures.remove(key.0);
         }
         is_present
     }
@@ -215,7 +211,7 @@ impl<F> FutureGroup<F> {
     /// # })
     /// ```
     pub fn contains_key(&mut self, key: Key) -> bool {
-        self.keys.contains(&key.0)
+        self.futures.contains(key.0)
     }
 
     /// Reserves capacity for `additional` more futures to be inserted.
@@ -270,7 +266,6 @@ impl<F: Future> FutureGroup<F> {
         }
 
         let index = self.futures.insert(future);
-        self.keys.insert(index);
 
         // Set the corresponding state
         self.states[index].set_pending();
@@ -293,7 +288,6 @@ impl<F: Future> FutureGroup<F> {
         // SAFETY: inserting a value into the futures slab does not ever move
         // any of the existing values.
         let index = unsafe { this.futures.as_mut().get_unchecked_mut() }.insert(future);
-        this.keys.insert(index);
         let key = Key(index);
 
         // If our slab allocated more space we need to
@@ -365,8 +359,8 @@ impl<F: Future> FutureGroup<F> {
         // single futures. Either to read from them or to drop them.
         let futures = unsafe { this.futures.as_mut().get_unchecked_mut() };
 
-        for index in this.keys.iter().cloned() {
-            if states[index].is_pending() && readiness.clear_ready(index) {
+        while let Some(index) = readiness.take_next_ready() {
+            if states[index].is_pending() {
                 // unlock readiness so we don't deadlock when polling
                 #[allow(clippy::drop_non_drop)]
                 drop(readiness);
@@ -396,12 +390,6 @@ impl<F: Future> FutureGroup<F> {
                 // Lock readiness so we can use it again
                 readiness = this.wakers.readiness();
             }
-        }
-
-        // Now that we're no longer borrowing `this.keys` we can remove
-        // the current key from the set
-        if let Poll::Ready(Some((key, _))) = ret {
-            this.keys.remove(&key.0);
         }
 
         ret

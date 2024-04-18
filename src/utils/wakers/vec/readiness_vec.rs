@@ -65,6 +65,12 @@ impl ReadinessVec {
         self.ready_count > 0
     }
 
+    pub(crate) fn take_next_ready(&mut self) -> Option<usize> {
+        let index = self.readiness_list.iter_ones().next()?;
+        self.clear_ready(index);
+        Some(index)
+    }
+
     /// Access the parent waker.
     #[inline]
     pub(crate) fn parent_waker(&self) -> Option<&Waker> {
